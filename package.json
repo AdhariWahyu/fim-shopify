@@ -1,0 +1,28 @@
+{
+  "name": "shopify-webkul-biteship-ccs",
+  "version": "1.0.0",
+  "description": "Custom Shopify CarrierService callback for Webkul multivendor + Biteship rates",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "register:carrier": "node scripts/register-carrier-service.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "shopify",
+    "webkul",
+    "biteship",
+    "carrier-service",
+    "multivendor"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0"
+  }
+}
