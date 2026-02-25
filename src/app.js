@@ -43,13 +43,15 @@ function buildFlowPayload(body, postalCodeLength) {
     body?.id ||
     body?.metaobject?.seller_id ||
     body?.metaobject?.sellerId ||
-    body?.metaobject?.id;
+    body?.metaobject?.webkulSellerId ||
+    body?.metaobject?.system?.id;
 
   const postalCode = normalizePostalCode(
     body?.postal_code ||
       body?.postalCode ||
       body?.zipcode ||
       body?.zip ||
+      body?.metaobject?.postalCode ||
       body?.metaobject?.zipcode ||
       body?.metaobject?.zip ||
       body?.metaobject?.postal_code,
@@ -58,6 +60,35 @@ function buildFlowPayload(body, postalCodeLength) {
 
   return {
     sellerId: sellerId ? String(sellerId) : "",
+    sellerEmail:
+      body?.sellerEmail ||
+      body?.email ||
+      body?.metaobject?.sellerEmail ||
+      body?.metaobject?.email ||
+      "",
+    contact:
+      body?.contact ||
+      body?.phone ||
+      body?.metaobject?.contact ||
+      body?.metaobject?.phone ||
+      "",
+    storeName:
+      body?.spStoreName ||
+      body?.storeName ||
+      body?.metaobject?.spStoreName ||
+      body?.metaobject?.storeName ||
+      "",
+    storeNameHandle:
+      body?.storeNameHandle ||
+      body?.metaobject?.storeNameHandle ||
+      body?.metaobject?.store_name_handle ||
+      "",
+    shopDomain:
+      body?.spShopName ||
+      body?.shopDomain ||
+      body?.metaobject?.spShopName ||
+      body?.metaobject?.shopDomain ||
+      "",
     postalCode,
     city: body?.city || body?.metaobject?.city || "",
     state:
@@ -153,6 +184,31 @@ function createApp({ config, logger }) {
     return token === config.auth.flowWebhookToken;
   }
 
+  async function ensureSellerId(payload) {
+    if (payload.sellerId) {
+      return payload;
+    }
+
+    try {
+      const resolvedSellerId = await webkulClient.resolveSellerIdByHints(payload);
+      if (resolvedSellerId) {
+        payload.sellerId = String(resolvedSellerId);
+      }
+    } catch (error) {
+      logger.warn("Failed to resolve seller ID from Flow hints", {
+        error: error.message,
+        hints: {
+          storeName: payload.storeName,
+          storeNameHandle: payload.storeNameHandle,
+          contact: payload.contact,
+          sellerEmail: payload.sellerEmail
+        }
+      });
+    }
+
+    return payload;
+  }
+
   app.get("/health", (req, res) => {
     res.json({
       ok: true,
@@ -207,12 +263,13 @@ function createApp({ config, logger }) {
     }
   });
 
-  app.post("/webhooks/shopify/flow/seller-origin", (req, res) => {
+  app.post("/webhooks/shopify/flow/seller-origin", async (req, res) => {
     if (!flowAuthorized(req)) {
       return res.status(401).json({ error: "unauthorized" });
     }
 
     const payload = buildFlowPayload(req.body || {}, config.shipping.postalCodeLength);
+    await ensureSellerId(payload);
 
     if (!payload.sellerId || !payload.postalCode) {
       return res.status(422).json({
@@ -222,13 +279,19 @@ function createApp({ config, logger }) {
             "seller_id",
             "sellerId",
             "metaobject.sellerId",
-            "metaobject.id"
+            "metaobject.webkulSellerId"
           ],
           postalCode: [
             "postal_code",
             "postalCode",
             "zipcode",
             "metaobject.zipcode"
+          ],
+          sellerHints: [
+            "storeName / metaobject.spStoreName",
+            "storeNameHandle / metaobject.storeNameHandle",
+            "email / metaobject.email",
+            "contact / metaobject.contact"
           ]
         }
       });
@@ -253,12 +316,13 @@ function createApp({ config, logger }) {
     });
   });
 
-  app.post("/admin/seller-origins", (req, res) => {
+  app.post("/admin/seller-origins", async (req, res) => {
     if (!adminAuthorized(req)) {
       return res.status(401).json({ error: "unauthorized" });
     }
 
     const payload = buildFlowPayload(req.body || {}, config.shipping.postalCodeLength);
+    await ensureSellerId(payload);
 
     if (!payload.sellerId || !payload.postalCode) {
       return res.status(422).json({

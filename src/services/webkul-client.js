@@ -26,6 +26,14 @@ function parseRetryAfterMs(value) {
   return null;
 }
 
+function normalizeText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeDigits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
 class WebkulClient {
   constructor(options) {
     this.baseUrl = options.baseUrl;
@@ -238,6 +246,172 @@ class WebkulClient {
     }
 
     return response.seller;
+  }
+
+  async listSellers({ limit = 250, page = 1 } = {}) {
+    const response = await this.request({
+      method: "GET",
+      url: "/api/v2/sellers.json",
+      params: {
+        limit,
+        page
+      }
+    });
+
+    if (Array.isArray(response?.sellers)) {
+      return response.sellers;
+    }
+
+    if (Array.isArray(response?.seller)) {
+      return response.seller;
+    }
+
+    if (response?.seller && typeof response.seller === "object") {
+      return [response.seller];
+    }
+
+    return [];
+  }
+
+  _scoreSellerMatch(seller, hints) {
+    const sellerId = String(seller?.id || "");
+    if (!sellerId) {
+      return { score: 0, matchedBy: "" };
+    }
+
+    const hintSellerId = normalizeText(hints.sellerId);
+    if (hintSellerId && hintSellerId === normalizeText(sellerId)) {
+      return { score: 100, matchedBy: "seller_id" };
+    }
+
+    const checks = [
+      {
+        key: "store_name_handle",
+        score: 90,
+        hintValue: normalizeText(hints.storeNameHandle),
+        sellerValue: normalizeText(seller?.store_name_handle)
+      },
+      {
+        key: "email",
+        score: 85,
+        hintValue: normalizeText(hints.sellerEmail),
+        sellerValue: normalizeText(seller?.email)
+      },
+      {
+        key: "contact",
+        score: 80,
+        hintValue: normalizeDigits(hints.contact),
+        sellerValue: normalizeDigits(seller?.contact)
+      },
+      {
+        key: "sp_store_name",
+        score: 75,
+        hintValue: normalizeText(hints.storeName),
+        sellerValue: normalizeText(seller?.sp_store_name)
+      },
+      {
+        key: "shop_domain",
+        score: 70,
+        hintValue: normalizeText(hints.shopDomain),
+        sellerValue: normalizeText(seller?.sp_shop_name)
+      }
+    ];
+
+    for (const check of checks) {
+      if (check.hintValue && check.sellerValue && check.hintValue === check.sellerValue) {
+        return { score: check.score, matchedBy: check.key };
+      }
+    }
+
+    return { score: 0, matchedBy: "" };
+  }
+
+  async resolveSellerIdByHints(hints) {
+    if (!hints || typeof hints !== "object") {
+      return "";
+    }
+
+    const normalizedHints = {
+      sellerId: hints.sellerId || hints.seller_id || "",
+      sellerEmail: hints.sellerEmail || hints.email || "",
+      contact: hints.contact || "",
+      storeName: hints.storeName || hints.spStoreName || "",
+      storeNameHandle: hints.storeNameHandle || "",
+      shopDomain: hints.shopDomain || hints.spShopName || ""
+    };
+
+    const directId = normalizeText(normalizedHints.sellerId);
+    if (/^\d+$/.test(directId)) {
+      return directId;
+    }
+
+    const hasAnyHint = Object.values(normalizedHints).some((value) => {
+      return normalizeText(value) !== "";
+    });
+
+    if (!hasAnyHint) {
+      return "";
+    }
+
+    const limit = 250;
+    const maxPages = 5;
+    const seenSellerIds = new Set();
+    let bestMatch = null;
+
+    for (let page = 1; page <= maxPages; page += 1) {
+      const sellers = await this.listSellers({ limit, page });
+      if (!sellers.length) {
+        break;
+      }
+
+      let newSellerFound = false;
+
+      for (const seller of sellers) {
+        const sellerId = String(seller?.id || "");
+        if (!sellerId || seenSellerIds.has(sellerId)) {
+          continue;
+        }
+
+        seenSellerIds.add(sellerId);
+        newSellerFound = true;
+
+        const match = this._scoreSellerMatch(seller, normalizedHints);
+        if (match.score === 0) {
+          continue;
+        }
+
+        if (!bestMatch || match.score > bestMatch.score) {
+          bestMatch = {
+            sellerId,
+            score: match.score,
+            matchedBy: match.matchedBy
+          };
+        }
+
+        if (match.score >= 90) {
+          break;
+        }
+      }
+
+      if (bestMatch && bestMatch.score >= 90) {
+        break;
+      }
+
+      if (!newSellerFound || sellers.length < limit) {
+        break;
+      }
+    }
+
+    if (!bestMatch) {
+      return "";
+    }
+
+    this.logger.info("Resolved seller ID from Webkul hints", {
+      sellerId: bestMatch.sellerId,
+      matchedBy: bestMatch.matchedBy
+    });
+
+    return bestMatch.sellerId;
   }
 
   async getSellerPrimaryLocation(sellerId) {

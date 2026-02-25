@@ -79,12 +79,27 @@ Script akan:
 ### A. Ganti flow yang saat ini membuat Shopify location
 Flow Anda saat ini: metaobject seller -> `locationAdd`.
 
-Ubah menjadi:
-- Trigger: seller/metaobject created/updated
-- Action: **Send HTTP Request** ke:
-  - `POST https://<domain-anda>/webhooks/shopify/flow/seller-origin`
-  - Header opsional: `x-flow-token: <FLOW_WEBHOOK_TOKEN>`
-  - Body contoh: lihat [docs/flow-seller-origin-payload.json](docs/flow-seller-origin-payload.json)
+Ganti menjadi **2 workflow** agar saat create dan update seller, origin ikut sinkron:
+
+1. Workflow 1 (create):
+   - Trigger: `Metaobject entry created` (definition: `sellers`)
+   - Action: **Send HTTP Request** ke:
+     - `POST https://<domain-anda>/webhooks/shopify/flow/seller-origin`
+     - Header opsional: `x-flow-token: <FLOW_WEBHOOK_TOKEN>`
+     - Body contoh: lihat [docs/flow-seller-origin-payload.json](docs/flow-seller-origin-payload.json)
+
+2. Workflow 2 (update):
+   - Trigger: `Metaobject entry updated` (definition: `sellers`)
+   - Action: **Send HTTP Request** ke endpoint yang sama:
+     - `POST https://<domain-anda>/webhooks/shopify/flow/seller-origin`
+     - Header opsional: `x-flow-token: <FLOW_WEBHOOK_TOKEN>`
+     - Body: pakai payload yang sama dengan workflow 1
+
+Catatan penting:
+- Jangan pakai `{{metaobject.id}}` karena untuk trigger ini sering tidak tersedia dan akan error validasi Flow (`"id" is invalid`).
+- Jika field seller ID Webkul tersedia di metaobject (mis. `sellerId`), boleh ditambahkan:
+  - `"seller_id": "{{metaobject.sellerId}}"`
+- Jika seller ID tidak tersedia, backend akan auto-resolve seller ID dari kombinasi `storeName/contact/email`.
 
 Dengan ini, data origin seller disimpan di service custom, bukan menambah Shopify location.
 

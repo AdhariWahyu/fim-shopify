@@ -281,12 +281,28 @@ async function main() {
 }
 
 main().catch((error) => {
+  const responseData = error.response?.data || null;
+  const responseText =
+    typeof responseData === "string"
+      ? responseData
+      : JSON.stringify(responseData || {});
+
+  let hint = null;
+  if (responseText.includes("app_not_installed")) {
+    hint =
+      "Shopify app is not installed on this shop. Open Dev Dashboard app Home and install it to the target store, then retry.";
+  } else if (responseText.includes("shop_not_permitted")) {
+    hint =
+      "Client credentials not permitted for this shop. App and shop might be in different organizations; use auth code/token exchange instead.";
+  }
+
   console.error(
     JSON.stringify(
       {
         ok: false,
         error: error.message,
-        details: error.response?.data || null
+        details: responseData,
+        hint
       },
       null,
       2

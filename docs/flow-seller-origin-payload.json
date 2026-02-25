@@ -1,9 +1,9 @@
 {
-  "seller_id": "{{metaobject.id}}",
+  "storeName": "{{metaobject.spStoreName}}",
+  "contact": "{{metaobject.contact}}",
   "storeAddress": "{{metaobject.storeAddress}}",
   "city": "{{metaobject.city}}",
   "state": "{{metaobject.state}}",
   "zipcode": "{{metaobject.zipcode}}",
-  "country": "ID",
-  "contact": "{{metaobject.contact}}"
+  "country": "ID"
 }
