@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Biteship Order Dashboard</title>
+    <style>
+      :root {
+        --bg: #f6f7f8;
+        --surface: #ffffff;
+        --text: #16212f;
+        --muted: #5f6b7a;
+        --accent: #0468d7;
+        --border: #dde2ea;
+        --danger: #ca3636;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: linear-gradient(180deg, #f7fafc 0%, #eef3f8 100%);
+        color: var(--text);
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      }
+
+      .container {
+        max-width: 1200px;
+        margin: 24px auto;
+        padding: 0 16px;
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 12px;
+      }
+
+      input,
+      select,
+      button,
+      textarea {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 14px;
+      }
+
+      input,
+      select,
+      textarea {
+        background: #fff;
+      }
+
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: #fff;
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+
+      button.danger {
+        background: var(--danger);
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+        padding: 10px 6px;
+        font-size: 13px;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      .json {
+        width: 100%;
+        min-height: 280px;
+        font-family: Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .status {
+        margin-top: 10px;
+        font-size: 13px;
+      }
+
+      .status.error {
+        color: var(--danger);
+      }
+
+      .status.ok {
+        color: #0d7a44;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      @media (max-width: 900px) {
+        th:nth-child(3),
+        td:nth-child(3),
+        th:nth-child(6),
+        td:nth-child(6) {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <h1>Biteship Order Dashboard</h1>
+        <p>
+          List order Shopify yang paid + unfulfilled, preview mapping seller-origin, lalu
+          create order Biteship per seller.
+        </p>
+        <div class="row">
+          <input id="adminKey" type="password" placeholder="ADMIN_API_KEY (x-admin-key)" style="min-width: 300px;" />
+          <input id="limit" type="number" min="1" max="100" value="20" style="width: 100px;" />
+          <button id="reloadBtn">Reload Orders</button>
+          <label><input id="autoFulfill" type="checkbox" /> Auto fulfill Shopify</label>
+          <label><input id="notifyCustomer" type="checkbox" /> Notify customer</label>
+          <label><input id="forceCreate" type="checkbox" /> Force create</label>
+        </div>
+        <div id="status" class="status"></div>
+      </div>
+
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Order</th>
+              <th>Created</th>
+              <th>Shipping</th>
+              <th>Destination Zip</th>
+              <th>Sync</th>
+              <th>Total</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="ordersBody"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <button id="loadLogsBtn" class="secondary">Load Rate Logs</button>
+          <input id="logsLimit" type="number" min="1" max="200" value="20" style="width: 100px;" />
+        </div>
+        <textarea id="payload" class="json" readonly></textarea>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        orders: [],
+      };
+
+      function adminHeaders() {
+        const adminKey = document.getElementById("adminKey").value.trim();
+        const headers = {
+          "Content-Type": "application/json",
+        };
+
+        if (adminKey) {
+          headers["x-admin-key"] = adminKey;
+        }
+
+        return headers;
+      }
+
+      function setStatus(message, level = "") {
+        const el = document.getElementById("status");
+        el.className = `status ${level}`.trim();
+        el.textContent = message;
+      }
+
+      function setPayload(data) {
+        document.getElementById("payload").value = JSON.stringify(data, null, 2);
+      }
+
+      function formatDate(value) {
+        if (!value) {
+          return "-";
+        }
+
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return value;
+        }
+
+        return date.toLocaleString();
+      }
+
+      function renderOrders() {
+        const body = document.getElementById("ordersBody");
+        body.innerHTML = "";
+
+        for (const row of state.orders) {
+          const tr = document.createElement("tr");
+
+          tr.innerHTML = `
+            <td>
+              <div><strong>${row.name || row.id}</strong></div>
+              <div style="color:#5f6b7a">${row.id}</div>
+            </td>
+            <td>${formatDate(row.createdAt)}</td>
+            <td>
+              <div>${row.shippingServiceTitle || "-"}</div>
+              <div style="color:#5f6b7a">${row.shippingServiceCode || ""}</div>
+            </td>
+            <td>${row.destinationPostalCode || "-"}</td>
+            <td>${row.syncStatus || "not_synced"}</td>
+            <td>${row.currency || "IDR"} ${row.totalPrice || "0"}</td>
+            <td>
+              <div class="actions">
+                <button data-action="plan" data-id="${row.id}" class="secondary">Preview Plan</button>
+                <button data-action="create" data-id="${row.id}">Create Biteship</button>
+              </div>
+            </td>
+          `;
+
+          body.appendChild(tr);
+        }
+      }
+
+      async function loadOrders() {
+        const limit = Number(document.getElementById("limit").value || 20);
+        setStatus("Loading orders...");
+
+        const response = await fetch(`/admin/orders/pending?limit=${encodeURIComponent(limit)}`, {
+          headers: adminHeaders(),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+
+        state.orders = payload.data || [];
+        renderOrders();
+        setStatus(`Loaded ${state.orders.length} order(s).`, "ok");
+      }
+
+      async function previewPlan(orderId) {
+        setStatus(`Loading plan for order ${orderId}...`);
+
+        const response = await fetch(`/admin/orders/${orderId}/plan`, {
+          headers: adminHeaders(),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+
+        setPayload(payload);
+        setStatus(`Plan loaded for order ${orderId}.`, "ok");
+      }
+
+      async function createBiteship(orderId) {
+        const autoFulfill = document.getElementById("autoFulfill").checked;
+        const notifyCustomer = document.getElementById("notifyCustomer").checked;
+        const force = document.getElementById("forceCreate").checked;
+
+        setStatus(`Creating Biteship order for ${orderId}...`);
+
+        const response = await fetch(`/admin/orders/${orderId}/create-biteship`, {
+          method: "POST",
+          headers: adminHeaders(),
+          body: JSON.stringify({
+            autoFulfill,
+            notifyCustomer,
+            force,
+          }),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        setPayload(payload);
+
+        if (!response.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+
+        setStatus(`Create Biteship selesai untuk order ${orderId}.`, "ok");
+        await loadOrders();
+      }
+
+      async function loadRateLogs() {
+        const limit = Number(document.getElementById("logsLimit").value || 20);
+        setStatus("Loading rate logs...");
+
+        const response = await fetch(`/admin/rate-logs?limit=${encodeURIComponent(limit)}`, {
+          headers: adminHeaders(),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+
+        setPayload(payload);
+        setStatus("Rate logs loaded.", "ok");
+      }
+
+      document.getElementById("reloadBtn").addEventListener("click", async () => {
+        try {
+          await loadOrders();
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      });
+
+      document.getElementById("loadLogsBtn").addEventListener("click", async () => {
+        try {
+          await loadRateLogs();
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      });
+
+      document.getElementById("ordersBody").addEventListener("click", async (event) => {
+        const button = event.target.closest("button[data-action]");
+        if (!button) {
+          return;
+        }
+
+        const orderId = button.getAttribute("data-id");
+        const action = button.getAttribute("data-action");
+
+        try {
+          if (action === "plan") {
+            await previewPlan(orderId);
+            return;
+          }
+
+          if (action === "create") {
+            await createBiteship(orderId);
+          }
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      });
+
+      loadOrders().catch((error) => {
+        setStatus(error.message, "error");
+      });
+    </script>
+  </body>
+</html>

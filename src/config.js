@@ -75,6 +75,7 @@ const config = {
     useBackupOnError: boolFromEnv("SHOPIFY_USE_BACKUP_ON_ERROR", false),
     phoneRequired: boolFromEnv("SHOPIFY_PHONE_REQUIRED", true),
     apiVersion: process.env.SHOPIFY_API_VERSION || "2025-10",
+    timeoutMs: intFromEnv("SHOPIFY_TIMEOUT_MS", 15000),
     shopDomain: process.env.SHOPIFY_SHOP_DOMAIN || "",
     adminAccessToken: process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || "",
     clientId: process.env.SHOPIFY_CLIENT_ID || "",
@@ -121,6 +122,20 @@ const config = {
     rateTtlSeconds: intFromEnv("RATE_CACHE_TTL_SECONDS", 840),
     maxEntries: intFromEnv("RATE_CACHE_MAX_ENTRIES", 3000)
   },
+  order: {
+    enabled: boolFromEnv("BITESHIP_ORDER_FEATURE_ENABLED", true),
+    autoCreateOnPaid: boolFromEnv("BITESHIP_ORDER_AUTO_CREATE_ON_PAID", false),
+    autoFulfillOnCreate: boolFromEnv("BITESHIP_ORDER_AUTO_FULFILL_ON_CREATE", false),
+    notifyCustomerOnFulfill: boolFromEnv(
+      "SHOPIFY_NOTIFY_CUSTOMER_ON_FULFILLMENT",
+      false
+    ),
+    maxDashboardOrders: intFromEnv("DASHBOARD_MAX_ORDERS", 25),
+    defaultDeliveryType: process.env.BITESHIP_ORDER_DELIVERY_TYPE || "now"
+  },
+  observability: {
+    rateLogMaxEntries: intFromEnv("RATE_LOG_MAX_ENTRIES", 500)
+  },
   auth: {
     flowWebhookToken: process.env.FLOW_WEBHOOK_TOKEN || "",
     adminApiKey: process.env.ADMIN_API_KEY || ""
@@ -129,6 +144,14 @@ const config = {
     sellerOriginStorePath: resolveRuntimePath(
       process.env.SELLER_ORIGIN_STORE_PATH,
       "./data/runtime/seller-origins.json"
+    ),
+    orderSyncStorePath: resolveRuntimePath(
+      process.env.ORDER_SYNC_STORE_PATH,
+      "./data/runtime/order-sync.json"
+    ),
+    rateLogStorePath: resolveRuntimePath(
+      process.env.RATE_LOG_STORE_PATH,
+      "./data/runtime/rate-logs.json"
     )
   }
 };

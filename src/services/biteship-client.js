@@ -48,6 +48,56 @@ class BiteshipClient {
     });
   }
 
+  async _requestWithRetry({ method, url, data, retryLabel }, attempt = 0) {
+    try {
+      const response = await this.http.request({
+        method,
+        url,
+        data
+      });
+      return response.data || {};
+    } catch (error) {
+      const status = error.response?.status;
+      const responseData = error.response?.data;
+      const retryAfterHeader = error.response?.headers?.["retry-after"];
+
+      if (
+        (status === 429 || status === 408 || status >= 500) &&
+        attempt < this.maxRetries
+      ) {
+        const retryAfterMs =
+          parseRetryAfterMs(retryAfterHeader) ||
+          this.retryDelayMs * 2 ** attempt;
+
+        this.logger.warn(`Retrying Biteship ${retryLabel} request`, {
+          status,
+          attempt,
+          retryAfterMs
+        });
+
+        await sleep(retryAfterMs);
+        return this._requestWithRetry(
+          { method, url, data, retryLabel },
+          attempt + 1
+        );
+      }
+
+      this.logger.error(`Biteship ${retryLabel} request failed`, {
+        status,
+        responseData,
+        payload: data
+      });
+
+      const wrappedError = new Error(`Biteship ${retryLabel} request failed`);
+      wrappedError.details = {
+        status,
+        responseData,
+        payload: data
+      };
+      throw wrappedError;
+    }
+  }
+
   _normalizeRate(item) {
     const { minDay, maxDay } = this._extractDurationDays(item);
 
@@ -116,19 +166,16 @@ class BiteshipClient {
     return 1;
   }
 
-  async getRates(
-    {
-      originPostalCode,
-      destinationPostalCode,
-      originLatitude,
-      originLongitude,
-      destinationLatitude,
-      destinationLongitude,
-      items,
-      couriers
-    },
-    attempt = 0
-  ) {
+  async getRates({
+    originPostalCode,
+    destinationPostalCode,
+    originLatitude,
+    originLongitude,
+    destinationLatitude,
+    destinationLongitude,
+    items,
+    couriers
+  }) {
     const payload = {
       couriers: couriers || this.couriers.join(","),
       items
@@ -161,67 +208,33 @@ class BiteshipClient {
       payload.destination_longitude = destinationLongitude;
     }
 
-    try {
-      const response = await this.http.post("/v1/rates/couriers", payload);
-      const data = response.data || {};
-      const pricing = Array.isArray(data.pricing)
-        ? data.pricing
-        : Array.isArray(data.rates)
-          ? data.rates
-          : [];
+    const data = await this._requestWithRetry({
+      method: "POST",
+      url: "/v1/rates/couriers",
+      data: payload,
+      retryLabel: "rate"
+    });
 
-      return pricing
-        .map((item) => this._normalizeRate(item))
-        .filter((rate) => rate.price > 0);
-    } catch (error) {
-      const status = error.response?.status;
-      const responseData = error.response?.data;
-      const retryAfterHeader = error.response?.headers?.["retry-after"];
+    const pricing = Array.isArray(data.pricing)
+      ? data.pricing
+      : Array.isArray(data.rates)
+        ? data.rates
+        : [];
 
-      if (
-        (status === 429 || status === 408 || status >= 500) &&
-        attempt < this.maxRetries
-      ) {
-        const retryAfterMs =
-          parseRetryAfterMs(retryAfterHeader) ||
-          this.retryDelayMs * 2 ** attempt;
+    return pricing
+      .map((item) => this._normalizeRate(item))
+      .filter((rate) => rate.price > 0);
+  }
 
-        this.logger.warn("Retrying Biteship rate request", {
-          status,
-          attempt,
-          retryAfterMs
-        });
+  async createOrder(payload) {
+    const data = await this._requestWithRetry({
+      method: "POST",
+      url: "/v1/orders",
+      data: payload,
+      retryLabel: "order-create"
+    });
 
-        await sleep(retryAfterMs);
-        return this.getRates(
-          {
-            originPostalCode,
-            destinationPostalCode,
-            originLatitude,
-            originLongitude,
-            destinationLatitude,
-            destinationLongitude,
-            items,
-            couriers
-          },
-          attempt + 1
-        );
-      }
-
-      this.logger.error("Biteship rate request failed", {
-        status,
-        responseData,
-        payload
-      });
-
-      const wrappedError = new Error("Biteship rate request failed");
-      wrappedError.details = {
-        status,
-        responseData,
-        payload
-      };
-      throw wrappedError;
-    }
+    return data;
   }
 }
 

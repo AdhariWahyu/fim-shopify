@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const path = require("node:path");
 const express = require("express");
 
 const { MemoryCache } = require("./services/memory-cache");
@@ -6,6 +7,10 @@ const { SellerOriginStore } = require("./services/seller-origin-store");
 const { WebkulClient } = require("./services/webkul-client");
 const { BiteshipClient } = require("./services/biteship-client");
 const { ShippingService } = require("./services/shipping-service");
+const { ShopifyAdminClient } = require("./services/shopify-admin-client");
+const { OrderSyncStore } = require("./services/order-sync-store");
+const { OrderSyncService } = require("./services/order-sync-service");
+const { RateLogStore } = require("./services/rate-log-store");
 const { normalizePostalCode } = require("./utils/location");
 
 function safeCompareBase64(left, right) {
@@ -143,6 +148,13 @@ function createApp({ config, logger }) {
     config.store.sellerOriginStorePath,
     logger
   );
+  const orderSyncStore = new OrderSyncStore(
+    config.store.orderSyncStorePath,
+    logger
+  );
+  const rateLogStore = new RateLogStore(config.store.rateLogStorePath, logger, {
+    maxEntries: config.observability.rateLogMaxEntries
+  });
 
   const webkulClient = new WebkulClient({
     ...config.webkul,
@@ -152,6 +164,11 @@ function createApp({ config, logger }) {
 
   const biteshipClient = new BiteshipClient({
     ...config.biteship,
+    logger
+  });
+
+  const shopifyAdminClient = new ShopifyAdminClient({
+    ...config.shopify,
     logger
   });
 
@@ -166,12 +183,28 @@ function createApp({ config, logger }) {
     sellerOriginStore
   });
 
+  const orderSyncService = new OrderSyncService({
+    config,
+    logger,
+    webkulClient,
+    biteshipClient,
+    shopifyAdminClient,
+    variantCache,
+    sellerCache,
+    sellerOriginStore,
+    orderSyncStore
+  });
+
   function adminAuthorized(req) {
     if (!config.auth.adminApiKey) {
       return true;
     }
 
-    const adminKey = req.get("x-admin-key") || "";
+    const adminKey =
+      req.get("x-admin-key") ||
+      req.query.admin_key ||
+      req.body?.admin_key ||
+      "";
     return adminKey === config.auth.adminApiKey;
   }
 
@@ -209,6 +242,17 @@ function createApp({ config, logger }) {
     return payload;
   }
 
+  function normalizedLimit(input, fallback = 20, max = 200) {
+    const parsed = Number.parseInt(input, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return fallback;
+    }
+
+    return Math.min(parsed, max);
+  }
+
+  const dashboardPath = path.join(__dirname, "public", "admin-dashboard.html");
+
   app.get("/health", (req, res) => {
     res.json({
       ok: true,
@@ -218,6 +262,14 @@ function createApp({ config, logger }) {
         variant: variantCache.size(),
         seller: sellerCache.size(),
         rate: rateCache.size()
+      },
+      stores: {
+        sellerOrigins: sellerOriginStore.all().length,
+        orderSync: orderSyncStore.size(),
+        rateLogs: rateLogStore.size()
+      },
+      features: {
+        orderSyncEnabled: config.order.enabled
       }
     });
   });
@@ -240,6 +292,24 @@ function createApp({ config, logger }) {
     try {
       const rateRequest = req.body?.rate || req.body;
       const result = await shippingService.calculate(rateRequest);
+      const quoteId = result?.debug?.quoteId || `quote_${Date.now()}`;
+
+      rateLogStore.append({
+        id: quoteId,
+        source: "carrier_service_callback",
+        tookMs: Date.now() - start,
+        destinationPostalCode: result?.debug?.destinationPostalCode || "",
+        destinationLatitude: result?.debug?.destinationLatitude || null,
+        destinationLongitude: result?.debug?.destinationLongitude || null,
+        sellerGroups: result?.debug?.sellerGroups || [],
+        skippedItems: result?.debug?.skippedItems || [],
+        rates: result?.rates || [],
+        request: {
+          destination: rateRequest?.destination || {},
+          currency: rateRequest?.currency || config.shipping.currency,
+          itemCount: Array.isArray(rateRequest?.items) ? rateRequest.items.length : 0
+        }
+      });
 
       logger.info("Carrier-service callback processed", {
         tookMs: Date.now() - start,
@@ -253,6 +323,15 @@ function createApp({ config, logger }) {
         tookMs: Date.now() - start,
         error: error.message,
         details: error.details
+      });
+
+      rateLogStore.append({
+        id: `quote_failed_${Date.now()}`,
+        source: "carrier_service_callback",
+        tookMs: Date.now() - start,
+        error: error.message,
+        details: error.details || null,
+        request: req.body?.rate || req.body || {}
       });
 
       if (config.shopify.useBackupOnError) {
@@ -306,6 +385,52 @@ function createApp({ config, logger }) {
     });
   });
 
+  app.post("/webhooks/shopify/flow/create-biteship-order", async (req, res) => {
+    if (!flowAuthorized(req)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    if (!config.order.enabled) {
+      return res.status(403).json({ error: "order_feature_disabled" });
+    }
+
+    const orderId =
+      req.body?.order_id ||
+      req.body?.orderId ||
+      req.body?.id ||
+      req.body?.order?.id ||
+      "";
+
+    if (!orderId) {
+      return res.status(422).json({ error: "missing_order_id" });
+    }
+
+    try {
+      const result = await orderSyncService.createBiteshipOrdersFromOrder(orderId, {
+        autoFulfill: config.order.autoFulfillOnCreate,
+        notifyCustomer: config.order.notifyCustomerOnFulfill,
+        source: "shopify_flow_webhook"
+      });
+
+      return res.status(200).json({
+        ok: result.ok,
+        skipped: result.skipped || false,
+        record: result.record
+      });
+    } catch (error) {
+      logger.error("Failed to process Flow create Biteship order webhook", {
+        orderId,
+        error: error.message,
+        details: error.details || null
+      });
+
+      return res.status(500).json({
+        error: error.message,
+        details: error.details || null
+      });
+    }
+  });
+
   app.get("/admin/seller-origins", (req, res) => {
     if (!adminAuthorized(req)) {
       return res.status(401).json({ error: "unauthorized" });
@@ -345,6 +470,19 @@ function createApp({ config, logger }) {
     try {
       const rateRequest = req.body?.rate || req.body;
       const result = await shippingService.calculate(rateRequest);
+
+      rateLogStore.append({
+        id: result?.debug?.quoteId || `quote_debug_${Date.now()}`,
+        source: "debug_quote",
+        destinationPostalCode: result?.debug?.destinationPostalCode || "",
+        destinationLatitude: result?.debug?.destinationLatitude || null,
+        destinationLongitude: result?.debug?.destinationLongitude || null,
+        sellerGroups: result?.debug?.sellerGroups || [],
+        skippedItems: result?.debug?.skippedItems || [],
+        rates: result?.rates || [],
+        request: rateRequest
+      });
+
       return res.json(result);
     } catch (error) {
       return res.status(500).json({
@@ -366,6 +504,194 @@ function createApp({ config, logger }) {
         rate: rateCache.size()
       }
     });
+  });
+
+  app.get("/admin/dashboard", (req, res) => {
+    return res.sendFile(dashboardPath);
+  });
+
+  app.get("/admin/rate-logs", (req, res) => {
+    if (!adminAuthorized(req)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const limit = normalizedLimit(req.query.limit, 20, 200);
+    return res.json({
+      data: rateLogStore.list(limit)
+    });
+  });
+
+  app.get("/admin/rate-logs/:logId", (req, res) => {
+    if (!adminAuthorized(req)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const entry = rateLogStore.get(req.params.logId);
+    if (!entry) {
+      return res.status(404).json({ error: "rate_log_not_found" });
+    }
+
+    return res.json({ data: entry });
+  });
+
+  app.get("/admin/orders/pending", async (req, res) => {
+    if (!adminAuthorized(req)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    if (!config.order.enabled) {
+      return res.status(403).json({ error: "order_feature_disabled" });
+    }
+
+    try {
+      const limit = normalizedLimit(
+        req.query.limit,
+        config.order.maxDashboardOrders,
+        100
+      );
+      const data = await orderSyncService.listPendingOrders({ limit });
+      return res.json({ ok: true, data });
+    } catch (error) {
+      return res.status(500).json({
+        error: error.message,
+        details: error.details || null
+      });
+    }
+  });
+
+  app.get("/admin/orders/:orderId/plan", async (req, res) => {
+    if (!adminAuthorized(req)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    if (!config.order.enabled) {
+      return res.status(403).json({ error: "order_feature_disabled" });
+    }
+
+    try {
+      const data = await orderSyncService.inspectOrder(req.params.orderId, {
+        courierCompany: req.query.courier_company,
+        courierType: req.query.courier_type
+      });
+
+      return res.json({ ok: true, data });
+    } catch (error) {
+      return res.status(500).json({
+        error: error.message,
+        details: error.details || null
+      });
+    }
+  });
+
+  app.post("/admin/orders/:orderId/create-biteship", async (req, res) => {
+    if (!adminAuthorized(req)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    if (!config.order.enabled) {
+      return res.status(403).json({ error: "order_feature_disabled" });
+    }
+
+    try {
+      const result = await orderSyncService.createBiteshipOrdersFromOrder(
+        req.params.orderId,
+        {
+          autoFulfill: req.body?.autoFulfill,
+          notifyCustomer: req.body?.notifyCustomer,
+          force: req.body?.force,
+          courierCompany: req.body?.courierCompany,
+          courierType: req.body?.courierType,
+          source: "admin_api"
+        }
+      );
+
+      return res.json({
+        ok: result.ok,
+        skipped: result.skipped || false,
+        record: result.record
+      });
+    } catch (error) {
+      return res.status(500).json({
+        error: error.message,
+        details: error.details || null
+      });
+    }
+  });
+
+  app.get("/admin/order-sync", (req, res) => {
+    if (!adminAuthorized(req)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const limit = normalizedLimit(req.query.limit, 50, 500);
+    return res.json({
+      data: orderSyncStore.list(limit)
+    });
+  });
+
+  app.get("/admin/order-sync/:orderId", (req, res) => {
+    if (!adminAuthorized(req)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const record = orderSyncStore.get(req.params.orderId);
+    if (!record) {
+      return res.status(404).json({ error: "order_sync_not_found" });
+    }
+
+    return res.json({ data: record });
+  });
+
+  app.post("/webhooks/shopify/orders/paid", async (req, res) => {
+    const providedHmac = req.get("x-shopify-hmac-sha256");
+    const verified = verifyShopifyHmac(
+      req.rawBody || Buffer.from(""),
+      providedHmac,
+      config.shopify.apiSecret
+    );
+
+    if (!verified) {
+      logger.warn("Rejected order paid webhook due to invalid HMAC");
+      return res.status(401).json({ error: "invalid_hmac" });
+    }
+
+    if (!config.order.enabled || !config.order.autoCreateOnPaid) {
+      return res.status(202).json({
+        ok: true,
+        skipped: true,
+        reason: "order_auto_create_disabled"
+      });
+    }
+
+    const orderId = req.body?.id;
+    if (!orderId) {
+      return res.status(422).json({ error: "missing_order_id" });
+    }
+
+    try {
+      const result = await orderSyncService.createBiteshipOrdersFromOrder(orderId, {
+        autoFulfill: config.order.autoFulfillOnCreate,
+        notifyCustomer: config.order.notifyCustomerOnFulfill,
+        source: "shopify_orders_paid_webhook"
+      });
+
+      return res.status(200).json({
+        ok: result.ok,
+        skipped: result.skipped || false,
+        record: result.record
+      });
+    } catch (error) {
+      logger.error("Failed to process Shopify orders/paid webhook", {
+        orderId,
+        error: error.message,
+        details: error.details || null
+      });
+
+      return res.status(500).json({
+        error: error.message,
+        details: error.details || null
+      });
+    }
   });
 
   app.use((req, res) => {

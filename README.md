@@ -32,8 +32,18 @@ Tambahan:
 - `GET /health`
 - `POST /webhooks/shopify/carrier-service`
 - `POST /webhooks/shopify/flow/seller-origin`
+- `POST /webhooks/shopify/flow/create-biteship-order` (trigger dari Shopify Flow)
+- `POST /webhooks/shopify/orders/paid` (opsional auto create order Biteship)
 - `GET /admin/seller-origins`
 - `POST /admin/seller-origins`
+- `GET /admin/dashboard` (simple UI)
+- `GET /admin/orders/pending`
+- `GET /admin/orders/:orderId/plan`
+- `POST /admin/orders/:orderId/create-biteship`
+- `GET /admin/order-sync`
+- `GET /admin/order-sync/:orderId`
+- `GET /admin/rate-logs`
+- `GET /admin/rate-logs/:logId`
 - `POST /debug/quote`
 - `GET /debug/cache`
 
@@ -48,12 +58,15 @@ Isi `.env` minimal:
 - `WEBKUL_ACCESS_TOKEN`
 - `WEBKUL_REFRESH_TOKEN`
 - `BITESHIP_API_KEY`
-- `SHOPIFY_SHOP_DOMAIN`
 - `PUBLIC_CALLBACK_URL`
 
 Auth Shopify untuk `register:carrier` ada 2 opsi:
 - Recommended (otomatis, tanpa copy token manual): isi `SHOPIFY_CLIENT_ID` + `SHOPIFY_CLIENT_SECRET`
 - Legacy: isi `SHOPIFY_ADMIN_ACCESS_TOKEN`
+
+Untuk fitur create order + fulfillment sync, wajib isi:
+- `SHOPIFY_SHOP_DOMAIN`
+- `SHOPIFY_ADMIN_ACCESS_TOKEN` **atau** (`SHOPIFY_CLIENT_ID` + `SHOPIFY_CLIENT_SECRET`)
 
 ## 2) Jalankan server
 
@@ -130,9 +143,70 @@ curl -s -X POST http://localhost:3000/debug/quote \
   }' | jq
 ```
 
+## 6) Dashboard create order Biteship
+
+1. Buka `GET /admin/dashboard`
+2. Isi `ADMIN_API_KEY` (jika diaktifkan)
+3. Klik `Reload Orders`
+4. Klik `Preview Plan` untuk lihat mapping:
+   - order line item -> seller
+   - origin postcode seller
+   - destination postcode buyer
+   - courier selection (dari service checkout atau cheapest requote)
+5. Klik `Create Biteship`
+
+Opsi:
+- `Auto fulfill Shopify`: jika aktif, setelah create order Biteship sukses maka service membuat fulfillment Shopify via Admin API.
+- `Notify customer`: kirim notifikasi fulfillment ke buyer (jika auto fulfill aktif).
+- `Force create`: paksa create ulang walau order pernah tersinkron.
+
+API langsung (tanpa dashboard):
+```bash
+curl -s -X POST http://localhost:3000/admin/orders/<ORDER_ID>/create-biteship \
+  -H 'Content-Type: application/json' \
+  -H 'x-admin-key: <ADMIN_API_KEY_jika_diisi>' \
+  -d '{"autoFulfill":true,"notifyCustomer":false}'
+```
+
+## 7) Observability postcode/rate
+
+Untuk audit detail asal-tujuan ongkir:
+- Cek `GET /admin/rate-logs` untuk list quote terbaru.
+- Cek `GET /admin/rate-logs/:logId` untuk detail per quote.
+- Log berisi:
+  - destination postcode buyer
+  - origin postcode per seller group
+  - seller id
+  - rates yang dikirim ke checkout
+  - item yang di-skip (jika ada)
+
+## 8) Auto create via webhook (opsional)
+
+Aktifkan env:
+- `BITESHIP_ORDER_AUTO_CREATE_ON_PAID=true`
+- `BITESHIP_ORDER_AUTO_FULFILL_ON_CREATE=true|false`
+
+Lalu daftarkan webhook Shopify `orders/paid` ke endpoint:
+- `POST https://<domain-anda>/webhooks/shopify/orders/paid`
+
+Jika flag auto create `false`, endpoint tetap merespons `202 skipped` (aman untuk staging).
+
+Alternatif tanpa subscription webhook app:
+- Shopify Flow trigger `Order paid`
+- Action `Send HTTP request` ke:
+  - `POST https://<domain-anda>/webhooks/shopify/flow/create-biteship-order`
+  - Header opsional: `x-flow-token: <FLOW_WEBHOOK_TOKEN>`
+  - Body contoh:
+    ```json
+    {
+      "order_id": "{{order.id}}"
+    }
+    ```
+
 ## Catatan implementasi penting
 - `total_price` response Shopify dikirim dalam subunit (x100), termasuk IDR.
 - Jika tidak ada service courier yang sama antar semua seller, sistem kirim fallback 1 rate `BSH_MULTI_CHEAPEST`.
+- Create order di Biteship **tidak otomatis** mengubah fulfillment status Shopify, kecuali opsi `autoFulfill` diaktifkan (dashboard/API/env auto webhook).
 - Jika `SHOPIFY_USE_BACKUP_ON_ERROR=true`, endpoint akan return 5xx saat error agar Shopify fallback ke backup rates.
 - Jika `false`, endpoint return `rates: []` untuk mencegah checkout hard-fail.
 - Header auth Biteship menggunakan `Authorization: <API_KEY>` (sesuai collection), termasuk key mode testing (`biteship_test...`).
@@ -152,8 +226,10 @@ curl -s -X POST http://localhost:3000/debug/quote \
 - Simpan file runtime di volume persisten untuk token store:
   - `WEBKUL_TOKEN_STORE_PATH`
   - `SELLER_ORIGIN_STORE_PATH`
+  - `RATE_LOG_STORE_PATH`
+  - `ORDER_SYNC_STORE_PATH`
 
 ## Referensi
 - Shopify Carrier Service API docs
 - Webkul MultiVendor API docs
-- Biteship Rates API docs
+- Biteship Rates + Orders API docs

@@ -1,4 +1,5 @@
-const { fromShopifySubunits, toShopifySubunits, toNumber } = require("../utils/money");
+const crypto = require("node:crypto");
+const { fromShopifySubunits, toShopifySubunits } = require("../utils/money");
 const { stableStringify, sha256Hex } = require("../utils/hash");
 const { normalizePostalCode, truthy } = require("../utils/location");
 
@@ -343,10 +344,13 @@ class ShippingService {
   }
 
   async calculate(rateRequest) {
+    const quoteId = `qt_${crypto.randomBytes(5).toString("hex")}`;
+
     if (!rateRequest || typeof rateRequest !== "object") {
       return {
         rates: [],
         debug: {
+          quoteId,
           reason: "invalid_payload"
         }
       };
@@ -359,6 +363,7 @@ class ShippingService {
       return {
         rates: [],
         debug: {
+          quoteId,
           reason: "no_shippable_items"
         }
       };
@@ -383,10 +388,19 @@ class ShippingService {
       return {
         rates: [],
         debug: {
+          quoteId,
           reason: "missing_destination_location"
         }
       };
     }
+
+    this.logger.info("Calculating carrier quote", {
+      quoteId,
+      destinationPostalCode,
+      destinationLatitude,
+      destinationLongitude,
+      itemCount: shippableItems.length
+    });
 
     const rateCacheKey = this._buildRateCacheKey(rateRequest);
     const cachedRates = this.rateCache.get(rateCacheKey);
@@ -394,6 +408,7 @@ class ShippingService {
       return {
         rates: cachedRates,
         debug: {
+          quoteId,
           source: "rate_cache"
         }
       };
@@ -405,6 +420,7 @@ class ShippingService {
       return {
         rates: [],
         debug: {
+          quoteId,
           reason: "missing_variant_ids"
         }
       };
@@ -473,6 +489,7 @@ class ShippingService {
       return {
         rates: [],
         debug: {
+          quoteId,
           reason: "no_valid_seller_groups",
           skippedItems
         }
@@ -481,6 +498,14 @@ class ShippingService {
 
     const biteshipResults = await Promise.all(
       sellerGroups.map(async (group) => {
+        this.logger.debug("Requesting Biteship rates for seller group", {
+          quoteId,
+          sellerId: group.sellerId,
+          originPostalCode: group.originPostalCode,
+          destinationPostalCode,
+          itemCount: group.items.length
+        });
+
         const rates = await this.biteshipClient.getRates({
           originPostalCode: group.originPostalCode,
           destinationPostalCode,
@@ -513,6 +538,14 @@ class ShippingService {
       this._toShopifyRate(rate, currency, sellerGroups.length, rate.fallback)
     );
 
+    this.logger.info("Carrier quote calculated", {
+      quoteId,
+      destinationPostalCode,
+      sellerGroupCount: sellerGroups.length,
+      returnedRateCount: shopifyRates.length,
+      skippedItemCount: skippedItems.length
+    });
+
     this.rateCache.set(
       rateCacheKey,
       shopifyRates,
@@ -522,7 +555,10 @@ class ShippingService {
     return {
       rates: shopifyRates,
       debug: {
+        quoteId,
         destinationPostalCode,
+        destinationLatitude,
+        destinationLongitude,
         subtotalIdr,
         sellerGroups: sellerGroups.map((group) => ({
           sellerId: group.sellerId,
