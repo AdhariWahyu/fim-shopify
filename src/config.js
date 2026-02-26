@@ -136,6 +136,16 @@ const config = {
   observability: {
     rateLogMaxEntries: intFromEnv("RATE_LOG_MAX_ENTRIES", 500)
   },
+  startup: {
+    autoRegisterCarrierService: boolFromEnv(
+      "AUTO_REGISTER_CARRIER_ON_STARTUP",
+      true
+    ),
+    failOnCarrierRegisterError: boolFromEnv(
+      "FAIL_STARTUP_ON_CARRIER_REGISTER_ERROR",
+      false
+    )
+  },
   auth: {
     flowWebhookToken: process.env.FLOW_WEBHOOK_TOKEN || "",
     adminApiKey: process.env.ADMIN_API_KEY || ""
